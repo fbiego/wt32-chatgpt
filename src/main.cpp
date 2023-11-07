@@ -39,6 +39,11 @@
 #include <ESP32Time.h>
 #include <Timber.h>
 
+#include <WiFi.h>
+#include <WiFiMulti.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+
 #ifdef USE_UI
 #include "ui/ui.h"
 #endif
@@ -261,11 +266,20 @@ public:
 // Create an instance of the prepared class.
 LGFX tft;
 
+ESP32Time rtc;
+WiFiMulti wifiMulti;
+HTTPClient http;
+
+DynamicJsonDocument gptRequest(2048);
+DynamicJsonDocument gptMessage(2048);
+
 static lv_disp_draw_buf_t draw_buf;
 static lv_disp_drv_t disp_drv;
 
 static lv_color_t disp_draw_buf[screenWidth * SCR];
 static lv_color_t disp_draw_buf2[screenWidth * SCR];
+
+void addItem(const char *name, const void *src, const char *text, bool success);
 
 /* Display flushing */
 void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p)
@@ -301,6 +315,252 @@ void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data)
   }
 }
 
+void requestResult(int requestCode, int statusCode, String payload, long time)
+{
+
+  Serial.printf("Request %d received, time %dms, code: %d\n", requestCode, time, statusCode);
+
+  // if (statusCode == HTTP_CODE_OK)
+  // {
+  //   // Serial.println(payload);
+  // }
+  Serial.println(payload);
+
+  switch (requestCode)
+  {
+  case TIME_REQUEST:
+    if (statusCode == HTTP_CODE_OK)
+    {
+      DynamicJsonDocument json(100);
+      deserializeJson(json, payload);
+      long t = json["timestamp"].as<long>();
+      rtc.setTime(t);
+    }
+    break;
+  case GPT_REQUEST:
+    if (statusCode == HTTP_CODE_OK)
+    {
+      DynamicJsonDocument json(2048);
+      deserializeJson(json, payload);
+      
+      String response = json["choices"][0]["message"]["content"].as<String>();
+      
+      addItem("ChatGPT", &ui_img_electron_png, response.c_str(), true);
+
+      gptMessage[msgIndex]["role"] = "assistant";
+      gptMessage[msgIndex]["content"] = response;
+      msgIndex++;
+    }
+    else
+    {
+      addItem("ChatGPT", &ui_img_electron_png, "Error while parsing your request, please check the serial monitor logs", false);
+    }
+    break;
+  }
+}
+
+void sendRequest(void *parameter)
+{
+  long t;
+
+  for (int r = 0; r < MAX_REQUEST; r++)
+  {
+    if (request[r].active)
+    {
+      t = millis();
+      http.begin(request[r].url);
+      for (int i = 0; i < request[r].headerSize; i++)
+      {
+        http.addHeader(request[r].headers[i].key, request[r].headers[i].value);
+      }
+      int httpCode;
+      if (request[r].method)
+      {
+        Serial.println(request[r].data);
+        httpCode = http.POST(request[r].data);
+      }
+      else
+      {
+        httpCode = http.GET();
+      }
+
+      String payload = http.getString();
+
+      // http.end();
+      t = millis() - t;
+      requestResult(request[r].code, httpCode, payload, t);
+      request[r].active = false;
+    }
+  }
+  http.end();
+  activeRequest = false;
+  // When you're done, call vTaskDelete. Don't forget this!
+  vTaskDelete(NULL);
+}
+
+void connectWiFi(void *parameter)
+{
+  uint8_t status;
+  while (true)
+  {
+    status = wifiMulti.run();
+    Serial.printf("WiFi trying: %d\n", status);
+    if (status == WL_CONNECTED || status == WL_CONNECT_FAILED || status == WL_DISCONNECTED || status == WL_NO_SSID_AVAIL)
+    {
+      break;
+    }
+  }
+  Serial.printf("WiFi exit: %d\n", status);
+  // When you're done, call vTaskDelete. Don't forget this!
+  vTaskDelete(NULL);
+}
+
+bool runRequest()
+{
+  // returns true if the task was created
+  // returns false if the previous task has not completed, new one cannot be created
+  if (!activeRequest)
+  {
+    activeRequest = true;
+    // xTaskCreatePinnedToCore(
+    xTaskCreate(
+        sendRequest,     // Function that should be called
+        "HTTP Requests", // Name of the task (for debugging)
+        8192,            // Stack size (bytes)
+        NULL,            // Parameter to pass
+        1,               // Task priority
+        NULL
+        // NULL,               // Task handle
+        // 1
+    );
+
+    return true;
+  }
+  else
+  {
+    return false;
+  }
+}
+
+void addItem(const char *name, const void *src, const char *text, bool success)
+{
+  lv_obj_t *ui_chatItemPanel = lv_obj_create(ui_chatPanel);
+  lv_obj_set_width(ui_chatItemPanel, 320);
+  lv_obj_set_height(ui_chatItemPanel, LV_SIZE_CONTENT); /// 67
+  lv_obj_set_align(ui_chatItemPanel, LV_ALIGN_CENTER);
+  lv_obj_set_flex_flow(ui_chatItemPanel, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(ui_chatItemPanel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+  lv_obj_clear_flag(ui_chatItemPanel, LV_OBJ_FLAG_SCROLLABLE); /// Flags
+  lv_obj_set_style_radius(ui_chatItemPanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_bg_color(ui_chatItemPanel, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_bg_opa(ui_chatItemPanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_border_width(ui_chatItemPanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_pad_left(ui_chatItemPanel, 10, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_pad_right(ui_chatItemPanel, 10, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_pad_top(ui_chatItemPanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_pad_bottom(ui_chatItemPanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_pad_row(ui_chatItemPanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_pad_column(ui_chatItemPanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+  lv_obj_t *ui_userTitlePanel = lv_obj_create(ui_chatItemPanel);
+  lv_obj_set_width(ui_userTitlePanel, 290);
+  lv_obj_set_height(ui_userTitlePanel, LV_SIZE_CONTENT); /// 50
+  lv_obj_set_align(ui_userTitlePanel, LV_ALIGN_CENTER);
+  lv_obj_set_flex_flow(ui_userTitlePanel, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(ui_userTitlePanel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+  lv_obj_clear_flag(ui_userTitlePanel, LV_OBJ_FLAG_SCROLLABLE); /// Flags
+  lv_obj_set_style_radius(ui_userTitlePanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_bg_color(ui_userTitlePanel, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_bg_opa(ui_userTitlePanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_border_width(ui_userTitlePanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_pad_left(ui_userTitlePanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_pad_right(ui_userTitlePanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_pad_top(ui_userTitlePanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_pad_bottom(ui_userTitlePanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+  lv_obj_t *ui_userIcon = lv_img_create(ui_userTitlePanel);
+  lv_img_set_src(ui_userIcon, src);
+  lv_obj_set_width(ui_userIcon, LV_SIZE_CONTENT);  /// 1
+  lv_obj_set_height(ui_userIcon, LV_SIZE_CONTENT); /// 1
+  lv_obj_set_align(ui_userIcon, LV_ALIGN_CENTER);
+  lv_obj_add_flag(ui_userIcon, LV_OBJ_FLAG_ADV_HITTEST);  /// Flags
+  lv_obj_clear_flag(ui_userIcon, LV_OBJ_FLAG_SCROLLABLE); /// Flags
+
+  lv_obj_t *ui_userName = lv_label_create(ui_userTitlePanel);
+  lv_obj_set_width(ui_userName, LV_SIZE_CONTENT);  /// 1
+  lv_obj_set_height(ui_userName, LV_SIZE_CONTENT); /// 1
+  lv_obj_set_align(ui_userName, LV_ALIGN_CENTER);
+  lv_label_set_text(ui_userName, name);
+  lv_obj_set_style_text_font(ui_userName, &lv_font_montserrat_16, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+  lv_obj_t *ui_textLabel = lv_label_create(ui_chatItemPanel);
+  lv_obj_set_width(ui_textLabel, 290);
+  lv_obj_set_height(ui_textLabel, LV_SIZE_CONTENT); /// 1
+  lv_obj_set_align(ui_textLabel, LV_ALIGN_CENTER);
+  lv_label_set_text(ui_textLabel, text);
+  lv_obj_set_style_text_font(ui_textLabel, &lv_font_montserrat_12, LV_PART_MAIN | LV_STATE_DEFAULT);
+  if (success)
+  {
+    lv_obj_set_style_text_color(ui_textLabel, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
+  }
+  else
+  {
+    lv_obj_set_style_text_color(ui_textLabel, lv_color_hex(0xFF0000), LV_PART_MAIN | LV_STATE_DEFAULT);
+  }
+}
+
+void onSendPrompt(lv_event_t *e)
+{
+  const char *text = lv_textarea_get_text(ui_promptText);
+
+  if (strlen(text) > 0)
+  {
+    addItem("You", &ui_img_user_a_png, text, true);
+
+    String txt(text);
+
+    gptMessage[msgIndex]["role"] = "user";
+    gptMessage[msgIndex]["content"] = txt;
+    msgIndex++;
+    gptRequest["messages"] = gptMessage;
+
+    String data;
+    serializeJson(gptRequest, data);
+
+    request[1].data = data;   // set the request data
+    request[1].active = true; // activate the request
+
+    // serializeJsonPretty(gptRequest, Serial);
+    // Serial.println();
+
+    if (!runRequest())
+    {
+      addItem("ChatGPT", &ui_img_user_a_png, "Failed to create a request. Try again later", false);
+    }
+
+    lv_textarea_set_text(ui_promptText, "");
+  }
+}
+
+void onTextChanged(lv_event_t *e)
+{
+  const char *text = lv_textarea_get_text(ui_promptText);
+  if (String(text).equals(""))
+  {
+    lv_obj_add_state(ui_sendButton, LV_STATE_DISABLED);
+  }
+  else
+  {
+    lv_obj_clear_state(ui_sendButton, LV_STATE_DISABLED);
+  }
+}
+
+void setWifi()
+{
+  // your wifi credentials
+  wifiMulti.addAP("wifi_name", "wifi_password");
+}
+
 void logCallback(Level level, unsigned long time, String message)
 {
   Serial.print(message);
@@ -334,7 +594,6 @@ void setup()
   else
   {
 
-
     lv_disp_draw_buf_init(&draw_buf, disp_draw_buf, disp_draw_buf2, screenWidth * SCR);
 
     /* Initialize the display */
@@ -355,6 +614,11 @@ void setup()
 
 #ifdef USE_UI
     ui_init();
+
+    lv_keyboard_set_textarea(ui_keyboard, ui_promptText);
+
+    // addItem("You", &ui_img_user_a_png, "Hello ChatGPT", true);
+    // addItem("ChatGPT", &ui_img_electron_png, "Hello there, how can I help you? Make sure you have setup your wifi credentials", false);
 #else
     lv_obj_t *label1 = lv_label_create(lv_scr_act());
     lv_obj_align(label1, LV_ALIGN_TOP_MID, 0, 100);
@@ -372,10 +636,59 @@ void setup()
 
     Timber.i("Setup done");
   }
+
+  setWifi();
+
+  xTaskCreate(
+      connectWiFi,    // Function that should be called
+      "WIFI Connect", // Name of the task (for debugging)
+      8192,           // Stack size (bytes)
+      NULL,           // Parameter to pass
+      1,              // Task priority
+      NULL);
+
+  gptMessage[msgIndex]["role"] = "user";
+  gptMessage[msgIndex]["content"] = "Hello ChatGPT";
+
+  gptRequest["model"] = "gpt-3.5-turbo";
+  gptRequest["messages"] = gptMessage;
+  gptRequest["temperature"] = 0.7;
+
+  request[0].active = true;
+  request[0].method = false;
+  request[0].code = TIME_REQUEST;
+  request[0].url = "https://iot.fbiego.com/api/v1/time";
+
+  request[1].active = false;
+  request[1].method = true;
+  request[1].code = GPT_REQUEST;
+  request[1].url = "https://api.openai.com/v1/chat/completions";
+
+  request[1].headers[0].key = "Authorization";
+  request[1].headers[0].value = bearer;
+  request[1].headers[1].key = "Content-Type";
+  request[1].headers[1].value = "application/json";
+  request[1].headerSize = 2;
 }
 
 void loop()
 {
   lv_timer_handler(); /* let the GUI do its work */
   delay(5);
+
+  if (WiFi.isConnected())
+  {
+    lv_obj_set_style_img_recolor_opa(ui_wifiIcon, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    if (!onConnect)
+    {
+      Serial.println("WiFi Connected");
+      runRequest();
+      onConnect = true;
+    }
+  }
+  else
+  {
+    onConnect = false;
+    lv_obj_set_style_img_recolor_opa(ui_wifiIcon, 200, LV_PART_MAIN | LV_STATE_DEFAULT);
+  }
 }

@@ -32,7 +32,7 @@
 
 
 #define PORTRAIT // comment for landscape
-// #define USE_UI  // uncomment to use ui files exported on /ui/ folder from squareline studio
+#define USE_UI  // uncomment to use ui files exported on /ui/ folder from squareline studio
 
 
 
@@ -44,3 +44,38 @@ static const uint32_t screenHeight = 480;
 static const uint32_t screenWidth = 480;
 static const uint32_t screenHeight = 320;
 #endif
+
+
+#define TIME_REQUEST 1
+#define GPT_REQUEST 2
+
+#define MAX_REQUEST 5
+
+// your openai API key
+String bearer =  "Bearer xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+
+long currentMillis;
+bool onConnect;
+bool activeRequest;
+long timeout;
+
+int msgIndex = 0;
+
+struct Header
+{
+   String key;
+   String value;
+};
+
+struct Request
+{
+  String url;
+  int code;
+  bool method;
+  String data;
+  bool active;
+  Header headers[5];
+  int headerSize = 0;
+};
+
+struct Request request[MAX_REQUEST];
