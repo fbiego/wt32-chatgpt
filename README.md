@@ -10,3 +10,6 @@ The UI is made using LVGL in which the code has been generated using SquareLine 
 
 You will need to setup your wifi credentials and openai API key
 
+https://github.com/fbiego/wt32-chatgpt/blob/f2f3c7097244826728d7628e2f0ca81262986161/include/main.h#L54-L55
+
+https://github.com/fbiego/wt32-chatgpt/blob/f2f3c7097244826728d7628e2f0ca81262986161/src/main.cpp#L560-L561
